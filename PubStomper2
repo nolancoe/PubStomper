@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+import argparse
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import time
+import os
+import sys
+import subprocess
+import re
+import logging
+from logging.handlers import RotatingFileHandler
+import json
+from colorama import init, Fore, Style
+from tqdm import tqdm
+import validators
+
+class SimpleSpider:
+    def __init__(self, base_url, max_depth=1, delay=0.1, wordlist=None, workers=10, cookies=None, no_verify_ssl=False):
+        self.base_url = base_url.rstrip('/')
+        self.parsed_base = urlparse(self.base_url)
+        self.max_depth = max_depth
+        self.delay = delay
+        self.visited = set()
+        self.wordlist = wordlist or []
+        self.workers = workers
+        self.cookies = cookies or {}
+        self.no_verify_ssl = no_verify_ssl
+        self.logger = logging.getLogger(__name__)
+        self.static_assets = []
+        self.forms = []
+        self.rate_limited = False
+        self.semaphore = asyncio.Semaphore(workers)
+
+    def same_domain(self, url):
+        return urlparse(url).netloc == self.parsed_base.netloc
+
+    def normalize(self, link, current_url):
+        abs_link = urljoin(current_url, link.split('#')[0])
+        return abs_link.rstrip('/')
+
+    async def xss_test(self, session, url, payload='<script>confirm(1)</script>'):
+        parsed = urlparse(url)
+        if not parsed.query:
+            return None
+        query_params = dict([kv.split('=') if '=' in kv else (kv, '') for kv in parsed.query.split('&')])
+        for key in query_params:
+            test_params = query_params.copy()
+            test_params[key] = payload
+            test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{'&'.join([f'{k}={v}' for k,v in test_params.items()])}"
+            try:
+                async with session.get(test_url, timeout=8, ssl=not self.no_verify_ssl) as resp:
+                    body = await resp.text()
+                    if payload in body:
+                        self.logger.warning(f"🔴 Possible XSS at {test_url}")
+                        return test_url
+            except Exception:
+                pass
+        return None
+
+    async def idor_test(self, session, url, test_ids=[1, 2, 3, 4, 5]):
+        parsed = urlparse(url)
+        if not parsed.query:
+            return []
+        param_map = dict([kv.split('=') if '=' in kv else (kv, '') for kv in parsed.query.split('&')])
+        vulnerable_urls = []
+        for param, val in param_map.items():
+            for tid in test_ids:
+                new_params = param_map.copy()
+                new_params[param] = str(tid)
+                test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{'&'.join([f'{k}={v}' for k,v in new_params.items()])}"
+                try:
+                    async with session.get(test_url, timeout=8, ssl=not self.no_verify_ssl) as resp:
+                        if resp.status == 200 and test_url != url:
+                            self.logger.info(f"🟠 IDOR candidate: {test_url} (Status: {resp.status})")
+                            vulnerable_urls.append(test_url)
+                except Exception:
+                    pass
+        return vulnerable_urls
+    async def fetch_links(self, session, url):
+        async with self.semaphore:
+            try:
+                async with session.get(url, timeout=10, allow_redirects=True, ssl=not self.no_verify_ssl) as resp:
+                    if resp.status >= 400:
+                        self.logger.error(f"Failed to fetch {url}: HTTP {resp.status}")
+                        if resp.status == 429:
+                            self.rate_limited = True
+                        return []
+                    content = await resp.read()
+                    ctype = resp.headers.get('Content-Type', '').lower()
+                    self.logger.info(f"Fetched {url} (Status: {resp.status}, Size: {len(content)} bytes, Content-Type: {ctype})")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.error(f"Failed to fetch {url}: {e}")
+                return []
+
+            if 'text/html' not in ctype:
+                if any(url.split('?')[0].lower().endswith(ext) for ext in ('.mp3', '.pdf', '.zip', '.jpg', '.png', '.mp4', '.css', '.txt', '.gz')):
+                    self.static_assets.append((url, ctype or 'unknown'))
+                    self.logger.info(f"Found static asset: {url} (MIME: {ctype or 'unknown'})")
+                return []
+
+            try:
+                soup = BeautifulSoup(content, 'html.parser')
+                links = [self.normalize(a['href'], url) for a in soup.find_all('a', href=True)]
+                forms = soup.find_all('form')
+                if forms:
+                    self.logger.info(f"Found {len(forms)} forms on {url}")
+                    for form in forms:
+                        form_details = {
+                            'url': url,
+                            'action': self.normalize(form.get('action', ''), url) if form.get('action') else url,
+                            'method': form.get('method', 'GET').upper(),
+                            'inputs': []
+                        }
+                        for input_tag in form.find_all('input'):
+                            input_details = {
+                                'name': input_tag.get('name', ''),
+                                'type': input_tag.get('type', ''),
+                                'id': input_tag.get('id', '')
+                            }
+                            form_details['inputs'].append(input_details)
+                        self.forms.append(form_details)
+                self.logger.debug(f"Extracted {len(links)} links from {url}")
+                return links
+            except Exception as e:
+                self.logger.error(f"Failed to parse HTML for {url}: {e}")
+                return []
+
+    async def fuzz_url(self, session, word):
+        candidate = f"{self.base_url}/{word}"
+        async with self.semaphore:
+            try:
+                async with session.head(candidate, timeout=3, allow_redirects=True, ssl=not self.no_verify_ssl) as r:
+                    if r.status < 400:
+                        self.logger.info(f"Fuzz hit: {candidate} (Status: {r.status})")
+                        return candidate
+                    elif r.status == 429:
+                        self.rate_limited = True
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+            return None
+
+    async def brute_force(self, session):
+        found = []
+        self.logger.info(f"Starting fuzzing with {len(self.wordlist)} words")
+        tasks = [self.fuzz_url(session, word) for word in self.wordlist]
+        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fuzzing"):
+            result = await f
+            if result:
+                found.append(result)
+            if self.rate_limited:
+                self.logger.warning("Rate limit detected (HTTP 429). Increasing delay.")
+                self.delay *= 2
+                self.rate_limited = False
+            await asyncio.sleep(self.delay)
+        return found
+
+    async def fetch_robots(self, session):
+        robots_url = f"{self.base_url}/robots.txt"
+        try:
+            async with session.get(robots_url, timeout=5, ssl=not self.no_verify_ssl) as resp:
+                if resp.status >= 400:
+                    return []
+                text = await resp.text()
+                disallowed = [line.strip() for line in text.splitlines() if line.startswith('Disallow:')]
+                self.logger.info(f"Found {len(disallowed)} disallowed paths in robots.txt")
+                return [path.lstrip('/') for path in disallowed if path.lstrip('/')]
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return []
+
+    async def crawl(self, session):
+        queue = [(self.base_url, 0)]
+        discovered = []
+        redirect_count = {}
+
+        while queue:
+            batch = []
+            while queue and len(batch) < self.workers:
+                batch.append(queue.pop(0))
+            tasks = []
+            batch_urls = []
+            for url, depth in batch:
+                if url in self.visited or depth > self.max_depth:
+                    continue
+                batch_urls.append((url, depth))
+                tasks.append(self.fetch_links(session, url))
+
+            if not tasks:
+                continue
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for (url, depth), children in zip(batch_urls, results):
+                if isinstance(children, Exception):
+                    self.logger.error(f"Error crawling {url}: {children}")
+                    continue
+                self.visited.add(url)
+                discovered.append(url)
+                self.logger.debug(f"Processing {url} at depth {depth}, found {len(children)} links")
+                for link in children:
+                    if self.same_domain(link) and link not in self.visited:
+                        redirect_count[link] = redirect_count.get(link, 0) + 1
+                        if redirect_count[link] > 3:
+                            self.logger.warning(f"Skipping {link}: Potential redirect loop")
+                            continue
+                        discovered.append(link)
+                        queue.append((link, depth + 1))
+
+            self.logger.debug(f"Queue size: {len(queue)}, Discovered: {len(discovered)}")
+            if self.rate_limited:
+                self.logger.warning("Rate limit detected (HTTP 429). Increasing delay.")
+                self.delay *= 2
+                self.rate_limited = False
+            await asyncio.sleep(self.delay)
+
+        return discovered
+
+def load_wordlist(path):
+    if not os.path.isfile(path):
+        logging.error(f"Wordlist not found: {path}")
+        sys.exit(1)
+    if os.path.getsize(path) > 100 * 1024 * 1024:
+        logging.warning("Wordlist is very large. Consider using a smaller one.")
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        return [line.strip() for line in f if line.strip()]
+async def generate_report(target_dir, whatweb_file, nmap_file, fuzz_file, crawl_file, fuzz_hits, crawl_results, static_assets, forms):
+    report = {
+        "target": urlparse(crawl_results[0]).netloc if crawl_results else "",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "whatweb": await asyncio.to_thread(lambda: open(whatweb_file).read().strip()) if os.path.exists(whatweb_file) else "",
+        "nmap": await asyncio.to_thread(lambda: open(nmap_file).read().strip()) if os.path.exists(nmap_file) else "",
+        "fuzz_hits": fuzz_hits,
+        "crawl_results": crawl_results,
+        "static_assets": [{"url": url, "mime_type": mime} for url, mime in static_assets],
+        "forms": forms,
+        "total_urls": len(fuzz_hits) + len(crawl_results) + len(static_assets)
+    }
+    report_file = os.path.join(target_dir, "report.json")
+    await asyncio.to_thread(lambda: json.dump(report, open(report_file, 'w'), indent=2))
+    return report_file
+
+async def main():
+    init()
+    parser = argparse.ArgumentParser(description="pubstomper2.py — XSS, IDOR, WhatWeb, Nmap, Crawl, Fuzz")
+    parser.add_argument("target", help="Target domain or IP")
+    parser.add_argument("--wordlist", "-w", help="Path to wordlist for fuzzing")
+    parser.add_argument("--depth", type=int, default=1, help="Crawl depth")
+    parser.add_argument("--delay", type=float, default=0.1, help="Delay between requests")
+    parser.add_argument("--workers", type=int, default=10, help="Concurrent workers")
+    parser.add_argument("--cookies", help="Cookie string: name=value; name2=value2")
+    parser.add_argument("--no-verify-ssl", action="store_true", help="Skip SSL verification")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+    parsed_target = urlparse(args.target)
+    target = parsed_target.netloc or parsed_target.path
+    base_url = args.target if parsed_target.scheme else f"https://{target}"
+    target_dir = os.path.expanduser(f"~/targets/{target}")
+    os.makedirs(target_dir, exist_ok=True)
+
+    cookies = {}
+    if args.cookies:
+        for kv in args.cookies.split(";"):
+            if "=" in kv:
+                k, v = kv.strip().split("=", 1)
+                cookies[k] = v
+
+    spider = SimpleSpider(
+        base_url,
+        max_depth=args.depth,
+        delay=args.delay,
+        wordlist=load_wordlist(args.wordlist) if args.wordlist else [],
+        workers=args.workers,
+        cookies=cookies,
+        no_verify_ssl=args.no_verify_ssl
+    )
+
+    async with aiohttp.ClientSession(cookies=cookies) as session:
+        whatweb_file = os.path.join(target_dir, "whatweb.txt")
+        await asyncio.to_thread(lambda: subprocess.run(["whatweb", "--color=never", target], stdout=open(whatweb_file, 'w')))
+
+        fuzz_hits = await spider.brute_force(session) if args.wordlist else []
+        fuzz_file = os.path.join(target_dir, "fuzz.txt")
+        if fuzz_hits:
+            await asyncio.to_thread(lambda: open(fuzz_file, 'w').writelines([url + '\n' for url in fuzz_hits]))
+
+        crawl_results = await spider.crawl(session)
+        all_results = sorted(set(fuzz_hits + crawl_results + [url for url, _ in spider.static_assets]))
+
+        crawl_file = os.path.join(target_dir, "crawl.txt")
+        await asyncio.to_thread(lambda: open(crawl_file, 'w').writelines([url + '\n' for url in all_results]))
+
+        # 🔥 XSS + IDOR scan
+        xss_results = []
+        idor_results = []
+        for url in all_results:
+            if '?' in url:
+                xss = await spider.xss_test(session, url)
+                if xss:
+                    xss_results.append(xss)
+                idor = await spider.idor_test(session, url)
+                if idor:
+                    idor_results.extend(idor)
+
+        xss_file = os.path.join(target_dir, "xss.txt")
+        await asyncio.to_thread(lambda: open(xss_file, 'w').writelines([x + '\n' for x in xss_results]))
+        idor_file = os.path.join(target_dir, "idor.txt")
+        await asyncio.to_thread(lambda: open(idor_file, 'w').writelines([x + '\n' for x in idor_results]))
+
+        if xss_results:
+            print(f"{Fore.RED}🧨 XSS Candidates ({len(xss_results)}): saved to {xss_file}{Style.RESET_ALL}")
+        if idor_results:
+            print(f"{Fore.YELLOW}🕵️ IDOR Candidates ({len(idor_results)}): saved to {idor_file}{Style.RESET_ALL}")
+
+        assets_file = os.path.join(target_dir, "assets.txt")
+        await asyncio.to_thread(lambda: open(assets_file, 'w').writelines(
+            [f"{url} (MIME: {mime})\n" for url, mime in spider.static_assets]))
+
+        forms_file = os.path.join(target_dir, "forms.txt")
+        form_lines = []
+        for form in spider.forms:
+            form_lines.append(f"URL: {form['url']}")
+            form_lines.append(f"  Action: {form['action']}")
+            form_lines.append(f"  Method: {form['method']}")
+            form_lines.append("  Inputs:")
+            for inp in form['inputs']:
+                form_lines.append(f"    - {inp['name']} ({inp['type']})")
+            form_lines.append("")
+        await asyncio.to_thread(lambda: open(forms_file, 'w').writelines([line + "\n" for line in form_lines]))
+
+        # Optional: generate JSON summary report
+        await generate_report(target_dir, whatweb_file, "", fuzz_file, crawl_file, fuzz_hits, crawl_results, spider.static_assets, spider.forms)
+
+if __name__ == "__main__":
+    asyncio.run(main())
