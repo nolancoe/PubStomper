@@ -195,6 +195,8 @@ class SimpleSpider:
             return []
 
     async def crawl(self, session):
+        print(f"{Fore.GREEN}▶️ Starting Crawl…{Style.RESET_ALL}")
+        crawl_count = 0
         queue = [(self.base_url, 0)]
         discovered = []
         redirect_count = {}
@@ -220,6 +222,8 @@ class SimpleSpider:
                     self.logger.error(f"Error crawling {url}: {children}")
                     continue
                 self.visited.add(url)
+                crawl_count += 1
+                print(f"{Fore.CYAN}  [+] Crawled {crawl_count} at depth {depth} → {url}{Style.RESET_ALL}")
                 discovered.append(url)
                 self.logger.debug(f"Processing {url} at depth {depth}, found {len(children)} links")
                 for link in children:
@@ -350,6 +354,8 @@ async def main():
     parser.add_argument("target", help="Host (e.g., example.com, www.example.com, 192.168.1.1) or URL (e.g., http://example.com)")
     parser.add_argument("--burp", action="store_true",
                         help="Replay discovered URLs through Burp proxy")
+    parser.add_argument("--nocrawl", action="store_true",
+                    help="Skip crawling phase entirely")
     parser.add_argument("--no-verify-ssl", action="store_true",
                         help="Disable SSL verification for HTTP requests (use with caution)")
     parser.add_argument("-w", "--wordlist", default=None,
@@ -484,7 +490,13 @@ async def main():
                         await asyncio.to_thread(lambda: open(fuzz_file, 'w').writelines([url + "\n" for url in sorted(set(fuzz_hits))]))
                         print(f"{Fore.GREEN}✅ Fuzz results → {fuzz_file}{Style.RESET_ALL}")
 
-        results = await spider.crawl(session)
+        results = []
+        if not args.nocrawl:
+            results = await spider.crawl(session)
+        else:
+            logger.info("Skipping crawling phase due to --nocrawl flag.")
+            print(f"{Fore.YELLOW}⚠️ Skipping crawling phase (--nocrawl){Style.RESET_ALL}")
+
 
         # Test XSS on forms if --xss flag is provided
         if args.xss and spider.forms:
