@@ -432,9 +432,10 @@ async def main():
         print(f"✅ Output path set to: {args.setoutput}")
         sys.exit(0)
 
-    if hasattr(args, "showoutput") and args.showoutput:
-        print(load_config_key() or "~/.local/share/pubstomp/targets")
+    if args.showoutput:
+        print(load_config_key("output_path") or "~/.local/share/pubstomp/targets")
         sys.exit(0)
+
 
     if args.setlog:
         save_config_key("log_path", os.path.abspath(args.setlog))
@@ -442,9 +443,7 @@ async def main():
         sys.exit(0)
 
     if args.showlog:
-        print(load_config_key("output_path") or "~/.local/share/pubstomp/targets")
-
-        sys.exit(0)
+        print(load_config_key("log_path") or "~/pentest.log")
 
     if not args.target:
         print("❌ Error: you must provide a target like 'pubstomp example.com'")
