@@ -2,7 +2,7 @@
 """
 # PubStomp
 
-**PubStomp** is an asynchronous pentesting toolkit designed for efficient reconnaissance, vulnerability fuzzing, and reporting against web applications.
+**PubStomp** is an advanced asynchronous pentesting toolkit designed for efficient reconnaissance, vulnerability fuzzing, and reporting against web applications.
 
 ## Features
 - 🔎 Async web crawling and spidering
@@ -23,6 +23,26 @@ Or once published:
 ```bash
 pip install pubstomp
 ```
+
+> ⚠️ If the `pubstomp` command is not found after install, it's likely because `~/.local/bin` is not in your `$PATH`.
+> 
+> You can fix this by adding the following line to your shell config (e.g., `~/.bashrc`, `~/.zshrc`):
+>
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+>
+> Then reload it with:
+>
+> ```bash
+> source ~/.bashrc  # or source ~/.zshrc
+> ```
+>
+> Alternatively, you can create a system-wide symlink:
+>
+> ```bash
+> sudo ln -s ~/.local/bin/pubstomp /usr/local/bin/pubstomp
+> ```
 
 ## Usage
 Set your output and log paths:
