@@ -438,12 +438,19 @@ async def main():
 
 
     if args.setlog:
-        save_config_key("log_path", os.path.abspath(args.setlog))
-        print(f"✅ Log path set to: {args.setlog}")
-        sys.exit(0)
+        custom_log = os.path.abspath(os.path.expanduser(args.setlog))
+
+    if os.path.isdir(custom_log):
+        print(f"❌ '{custom_log}' is a directory. Please provide a full log file path like /path/to/pentest.log")
+        sys.exit(1)
+
+    save_config_key("log_path", custom_log)
+    print(f"✅ Log path set to: {custom_log}")
+    sys.exit(0)
 
     if args.showlog:
         print(load_config_key("log_path") or "~/pentest.log")
+        sys.exit(0)
 
     if not args.target:
         print("❌ Error: you must provide a target like 'pubstomp example.com'")
