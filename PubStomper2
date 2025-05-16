@@ -16,6 +16,35 @@ from colorama import init, Fore, Style
 from tqdm import tqdm
 import validators
 
+
+CONFIG_PATH = os.path.expanduser("~/.config/pubstomp/config.json")
+
+def load_config_key(key):
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                data = json.load(f)
+                return data.get(key)
+        except Exception:
+            pass
+    return None
+
+
+def save_config_key(key, value):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    config = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                config = json.load(f)
+        except Exception:
+            pass
+    config[key] = value
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f)
+
+
+
 class SimpleSpider:
     def __init__(self, base_url, max_depth=1, delay=0.1, wordlist=None, workers=10, cookies=None, no_verify_ssl=False):
         self.base_url = base_url.rstrip('/')
@@ -41,6 +70,10 @@ class SimpleSpider:
             "javascript:alert(1)",
             "'><script>alert(1)</script>"
         ]
+
+
+    
+
 
     def same_domain(self, url):
         return urlparse(url).netloc == self.parsed_base.netloc
@@ -100,7 +133,7 @@ class SimpleSpider:
                 self.logger.error(f"Failed to parse HTML for {url}: {e}")
                 return []
 
-    async def test_xss_form(self, session, form):
+    async def test_xss_form(self, session, form, xss_pbar):
         """Test a form for XSS by submitting payloads and checking for reflection."""
         action = form['action']
         method = form['method']
@@ -108,7 +141,8 @@ class SimpleSpider:
         results = []
         for payload in self.XSS_PAYLOADS:
             data = {input_field['name']: payload for input_field in inputs if input_field['name']}
-            if not data:  # Skip forms with no named inputs
+            if not data: # Skip forms with no named inputs
+                xss_pbar.update(1)
                 continue
             try:
                 if method.upper() == 'POST':
@@ -149,6 +183,7 @@ class SimpleSpider:
                     'response_status': None
                 })
                 self.logger.error(f"XSS test failed for {action}: {e}")
+            xss_pbar.update(1)
             await asyncio.sleep(self.delay)  # Respect rate limiting
         return results
 
@@ -195,7 +230,9 @@ class SimpleSpider:
             return []
 
     async def crawl(self, session):
+        from tqdm import tqdm
         print(f"{Fore.GREEN}▶️ Starting Crawl…{Style.RESET_ALL}")
+        pbar = tqdm(desc="Crawling pages", unit="url")
         crawl_count = 0
         queue = [(self.base_url, 0)]
         discovered = []
@@ -223,7 +260,7 @@ class SimpleSpider:
                     continue
                 self.visited.add(url)
                 crawl_count += 1
-                print(f"{Fore.CYAN}  [+] Crawled {crawl_count} at depth {depth} → {url}{Style.RESET_ALL}")
+                pbar.update(1)
                 discovered.append(url)
                 self.logger.debug(f"Processing {url} at depth {depth}, found {len(children)} links")
                 for link in children:
@@ -242,6 +279,7 @@ class SimpleSpider:
                 self.rate_limited = False
             await asyncio.sleep(self.delay)
 
+        pbar.close()
         return discovered
 
 def load_wordlist(path):
@@ -351,7 +389,7 @@ async def main():
     parser = argparse.ArgumentParser(
         description="Enhanced pentesting tool: WhatWeb → optional Nmap → async crawl with fuzzing → optional Burp replay → optional XSS testing"
     )
-    parser.add_argument("target", help="Host (e.g., example.com, www.example.com, 192.168.1.1) or URL (e.g., http://example.com)")
+    parser.add_argument("target", nargs="?", help="Host (e.g., example.com, www.example.com, 192.168.1.1) or URL (e.g., http://example.com)")
     parser.add_argument("--burp", action="store_true",
                         help="Replay discovered URLs through Burp proxy")
     parser.add_argument("--nocrawl", action="store_true",
@@ -371,16 +409,56 @@ async def main():
                         help="Generate a Markdown report from report.json")
     parser.add_argument("--report-output", default="report.md",
                         help="Output file for Markdown report (default: report.md)")
+    parser.add_argument("--nonmap", action="store_true", help="Skip running Nmap after WhatWeb")
     parser.add_argument("--xss", action="store_true",
                         help="Test forms for XSS vulnerabilities with predefined payloads")
+    
+    parser.add_argument("--setoutput", help="Set custom output directory for scan results")
+    parser.add_argument("--showoutput", action="store_true", help="Show current output directory for results")
+    parser.add_argument("--setlog", help="Set custom log file path")
+    parser.add_argument("--showlog", action="store_true", help="Show current log file path")
+
+
     args = parser.parse_args()
 
+
+
+    if hasattr(args, "setoutput") and args.setoutput:
+        custom_path = os.path.abspath(args.setoutput)
+        if not os.path.isdir(custom_path):
+            print(f"❌ Invalid path: {custom_path}")
+            sys.exit(1)
+        save_config_key("output_path", custom_path)
+        print(f"✅ Output path set to: {args.setoutput}")
+        sys.exit(0)
+
+    if hasattr(args, "showoutput") and args.showoutput:
+        print(load_config_key() or "~/.local/share/pubstomp/targets")
+        sys.exit(0)
+
+    if args.setlog:
+        save_config_key("log_path", os.path.abspath(args.setlog))
+        print(f"✅ Log path set to: {args.setlog}")
+        sys.exit(0)
+
+    if args.showlog:
+        print(load_config_key("output_path") or "~/.local/share/pubstomp/targets")
+
+        sys.exit(0)
+
+    if not args.target:
+        print("❌ Error: you must provide a target like 'pubstomp example.com'")
+        sys.exit(1)
+
+    log_path = load_config_key("log_path") or os.path.expanduser("~/pentest.log")
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
-    handler = RotatingFileHandler(os.path.expanduser("~/pentest.log"), maxBytes=10*1024*1024, backupCount=5)
+    handler = RotatingFileHandler(os.path.expanduser(log_path), maxBytes=10*1024*1024, backupCount=5)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+    print(f"{Fore.CYAN}📄 Logging to: {log_path}{Style.RESET_ALL}")
 
     parsed_target = urlparse(args.target)
     if parsed_target.scheme and parsed_target.netloc:
@@ -395,7 +473,11 @@ async def main():
         sys.exit(1)
 
     host = parsed_target.netloc or target
-    target_dir = os.path.expanduser(f"~/targets/{host}")
+    output_root = load_output_path() or os.path.expanduser("~/.local/share/pubstomp/targets")
+    target_dir = os.path.join(output_root, host)
+
+    target_dir = os.path.abspath(target_dir)
+
     os.makedirs(target_dir, exist_ok=True)
 
     cookies = {}
@@ -434,9 +516,7 @@ async def main():
         ip_match = re.search(r'IP\[([^\]]+)\]', content)
         ip = ip_match.group(1) if ip_match else None
 
-        if ip:
-            choice = input(f"{Fore.YELLOW}Run nmap with vuln scripts on {ip}? [Y/n] {Style.RESET_ALL}").strip().lower()
-            if choice in ("", "y", "yes"):
+        if ip and not args.nonmap:
                 nmap_file = os.path.join(target_dir, "nmap.txt")
                 logger.info(f"Running nmap --script vuln -A {ip}")
                 print(f"{Fore.GREEN}▶️ sudo nmap --script vuln -A {ip} → {nmap_file}{Style.RESET_ALL}")
@@ -502,9 +582,12 @@ async def main():
         if args.xss and spider.forms:
             logger.info(f"Testing {len(spider.forms)} forms for XSS vulnerabilities")
             print(f"{Fore.GREEN}▶️ Testing {len(spider.forms)} forms for XSS{Style.RESET_ALL}")
-            for form in spider.forms:
-                xss_form_results = await spider.test_xss_form(session, form)
-                spider.xss_results.extend(xss_form_results)
+            from tqdm import tqdm
+            total_payloads = len(spider.forms) * len(spider.XSS_PAYLOADS)
+            with tqdm(total=total_payloads, desc="XSS testing", unit="test") as xss_pbar:
+                for form in spider.forms:
+                    xss_form_results = await spider.test_xss_form(session, form, xss_pbar)
+                    spider.xss_results.extend(xss_form_results)
             print(f"{Fore.GREEN}✅ Completed XSS testing on forms{Style.RESET_ALL}")
 
         all_results = sorted(set(fuzz_hits + results + [url for url, _ in spider.static_assets]))
@@ -539,20 +622,33 @@ async def main():
         if args.report:
             markdown_file = os.path.join(target_dir, args.report_output)
             await generate_markdown_report(report_file, markdown_file)
+            print(f"{Fore.MAGENTA}=== Report Preview ==={Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}Run 'cat {markdown_file}' to view full report{Style.RESET_ALL}")
+            async def preview_markdown(file_path):
+                try:
+                    with open(file_path, 'r') as f:
+                        lines = [next(f) for _ in range(16)]
+                    for line in lines:  
+                        print(line.strip())
+                except (StopIteration, FileNotFoundError):
+                    print(f"{Fore.RED}✖ Could not read {file_path}{Style.RESET_ALL}")
+            await preview_markdown(markdown_file)
+        else:
 
-        print(f"\n{Fore.MAGENTA}=== WhatWeb Results ==={Style.RESET_ALL}")
-        await asyncio.to_thread(lambda: subprocess.call(['cat', whatweb_file]))
-        if fuzz_hits:
-            print(f"\n{Fore.MAGENTA}=== Fuzzing Results ==={Style.RESET_ALL}")
-            await asyncio.to_thread(lambda: subprocess.call(['cat', fuzz_file]))
-        if spider.static_assets:
-            print(f"\n{Fore.MAGENTA}=== Static Assets ==={Style.RESET_ALL}")
-            await asyncio.to_thread(lambda: subprocess.call(['cat', assets_file]))
-        if spider.forms:
-            print(f"\n{Fore.MAGENTA}=== Forms ==={Style.RESET_ALL}")
-            await asyncio.to_thread(lambda: subprocess.call(['cat', forms_file]))
-        print(f"\n{Fore.MAGENTA}=== Crawl and Asset Results ==={Style.RESET_ALL}")
-        await asyncio.to_thread(lambda: subprocess.call(['cat', crawl_file]))
+
+            print(f"\n{Fore.MAGENTA}=== WhatWeb Results ==={Style.RESET_ALL}")
+            await asyncio.to_thread(lambda: subprocess.call(['cat', whatweb_file]))
+            if fuzz_hits:
+                print(f"\n{Fore.MAGENTA}=== Fuzzing Results ==={Style.RESET_ALL}")
+                await asyncio.to_thread(lambda: subprocess.call(['cat', fuzz_file]))
+            if spider.static_assets:
+                print(f"\n{Fore.MAGENTA}=== Static Assets ==={Style.RESET_ALL}")
+                await asyncio.to_thread(lambda: subprocess.call(['cat', assets_file]))
+            if spider.forms:
+                print(f"\n{Fore.MAGENTA}=== Forms ==={Style.RESET_ALL}")
+                await asyncio.to_thread(lambda: subprocess.call(['cat', forms_file]))
+            print(f"\n{Fore.MAGENTA}=== Crawl and Asset Results ==={Style.RESET_ALL}")
+            await asyncio.to_thread(lambda: subprocess.call(['cat', crawl_file]))
 
         if args.burp:
             logger.info("Replaying through Burp proxy at 127.0.0.1:8080")
@@ -570,5 +666,3 @@ async def main():
                     print(f"{Fore.RED}  ✖ Error proxying {u}: {e}{Style.RESET_ALL}")
                 await asyncio.sleep(args.delay)
 
-if __name__ == "__main__":
-    asyncio.run(main())
