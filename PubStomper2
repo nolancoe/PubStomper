@@ -479,7 +479,7 @@ async def main():
         sys.exit(1)
 
     host = parsed_target.netloc or target
-    output_root = load_output_path() or os.path.expanduser("~/.local/share/pubstomp/targets")
+    output_root = load_config_key("output_path") or os.path.expanduser("~/.local/share/pubstomp/targets")
     target_dir = os.path.join(output_root, host)
 
     target_dir = os.path.abspath(target_dir)
