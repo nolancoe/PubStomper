@@ -1,16 +1,16 @@
 # README.md
-"""
+
 # PubStomp
 
 **PubStomp** is an advanced asynchronous pentesting toolkit designed for efficient reconnaissance, vulnerability fuzzing, and reporting against web applications.
 
 ## Features
-- 🔎 Async web crawling and spidering
-- 🎯 Custom wordlists for fuzzing endpoints
-- 🔐 Optional XSS payload testing
-- 🧪 Report generation to JSON
-- 🎨 Colored terminal output with progress bars
-- 💾 Configurable output and log file paths
+-  Async web crawling and spidering
+-  Custom wordlists for fuzzing endpoints
+-  Optional XSS payload testing
+- 離 Report generation to JSON
+-  Colored terminal output with progress bars
+-  Configurable output and log file paths
 
 ## Installation
 Install via pip from source:
@@ -71,4 +71,3 @@ Prints all command-line options.
 
 ## License
 This project is licensed under the MIT License.
-"""
