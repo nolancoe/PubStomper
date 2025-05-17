@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import cmd
 import aiohttp
 import asyncio
 from bs4 import BeautifulSoup
@@ -430,6 +431,9 @@ async def main():
     parser.add_argument("--showxss", action="store_true", help="Show current XSS wordlist path")
     parser.add_argument("--resetxss", action="store_true", help="Reset to default built-in XSS payloads")
     parser.add_argument("--setxss", help="Set custom wordlist path for XSS testing")
+    parser.add_argument("--setnmap", help="Set custom Nmap arguments (e.g. '-A -sN')")
+    parser.add_argument("--shownmap", action="store_true", help="Show current Nmap arguments")
+    parser.add_argument("--resetnmap", action="store_true", help="Reset Nmap arguments to default")
 
     args = parser.parse_args()
 
@@ -464,6 +468,20 @@ async def main():
         print(load_config_key("log_path") or "~/pubstomp.log")
         sys.exit(0)
 
+
+    if args.setnmap:
+        save_config_key("nmap_args", args.setnmap)
+        print(f"✅ Nmap arguments set to: {args.setnmap}")
+        sys.exit(0)
+
+    if args.shownmap:
+        print(load_config_key("nmap_args") or "--script vuln -A")
+        sys.exit(0)
+
+    if args.resetnmap:
+        save_config_key("nmap_args", None)
+        print("🔄 Nmap arguments reset to default: --script vuln -A")
+        sys.exit(0)
 
     if args.setxss:
         full_path = os.path.abspath(os.path.expanduser(args.setxss))
@@ -555,11 +573,16 @@ async def main():
 
         if ip and not args.nonmap:
                 nmap_file = os.path.join(target_dir, "nmap.txt")
-                logger.info(f"Running nmap --script vuln -A {ip}")
-                print(f"{Fore.GREEN}▶️ sudo nmap --script vuln -A {ip} → {nmap_file}{Style.RESET_ALL}")
+                nmap_args = load_config_key("nmap_args") or "--script vuln -A"
+                logger.info(f"Running nmap {nmap_args} -A {ip}")
+                import shlex
+                cmd = ["sudo", "nmap"] + shlex.split(nmap_args) + [ip]
+                print(f"{Fore.GREEN}▶️ sudo nmap {nmap_args} {ip} → {nmap_file}{Style.RESET_ALL}")
+
+
                 try:
                     await asyncio.to_thread(lambda: subprocess.run(
-                        ["sudo", "nmap", "--script", "vuln", "-A", ip],
+                        cmd,
                         stdout=open(nmap_file, 'w'),
                         stderr=subprocess.STDOUT,
                         text=True,
