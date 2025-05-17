@@ -464,6 +464,25 @@ async def main():
         print(load_config_key("log_path") or "~/pubstomp.log")
         sys.exit(0)
 
+
+    if args.setxss:
+        full_path = os.path.abspath(os.path.expanduser(args.setxss))
+        if not os.path.isfile(full_path):
+            print(f"❌ XSS wordlist path '{full_path}' does not exist.")
+            sys.exit(1)
+        save_config_key("xss_path", full_path)
+        print(f"✅ XSS wordlist set to: {full_path}")
+        sys.exit(0)
+
+    if args.showxss:
+        print(load_config_key("xss_path") or "Using default built-in XSS payloads.")
+        sys.exit(0)
+
+    if args.resetxss:
+        save_config_key("xss_path", None)
+        print("🔄 XSS wordlist reset to default payloads.")
+        sys.exit(0)
+
     if not args.target:
         print("❌ Error: you must provide a target like 'pubstomp example.com'")
         sys.exit(1)
@@ -596,23 +615,7 @@ async def main():
             print(f"{Fore.YELLOW}⚠️ Skipping crawling phase (--nocrawl){Style.RESET_ALL}")
 
 
-        if args.setxss:
-            full_path = os.path.abspath(os.path.expanduser(args.setxss))
-            if not os.path.isfile(full_path):
-                print(f"❌ XSS wordlist path '{full_path}' does not exist.")
-                sys.exit(1)
-            save_config_key("xss_path", full_path)
-            print(f"✅ XSS wordlist set to: {full_path}")
-            sys.exit(0)
-
-        if args.showxss:
-            print(load_config_key("xss_path") or "Using default built-in XSS payloads.")
-            sys.exit(0)
-
-        if args.resetxss:
-            save_config_key("xss_path", None)
-            print("🔄 XSS wordlist reset to default payloads.")
-            sys.exit(0)
+        
 
 
         # Test XSS on forms if --xss flag is provided
