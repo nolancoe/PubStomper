@@ -44,6 +44,22 @@ def save_config_key(key, value):
         json.dump(config, f)
 
 
+def load_xss_payloads():
+    custom_path = load_config_key("xss_path")
+    if custom_path and os.path.isfile(custom_path):
+        try:
+            with open(custom_path, "r") as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            print(f"⚠️ Failed to read custom XSS wordlist: {e}. Falling back to defaults.")
+    
+    return [
+        "<script>alert(1)</script>",
+        "\"><img src=x onerror=alert(1)>",
+        "javascript:alert(1)",
+        "'><script>alert(1)</script>"
+    ]
+
 
 class SimpleSpider:
     def __init__(self, base_url, max_depth=1, delay=0.1, wordlist=None, workers=10, cookies=None, no_verify_ssl=False):
@@ -63,13 +79,7 @@ class SimpleSpider:
         self.rate_limited = False
         self.semaphore = asyncio.Semaphore(workers)
 
-        # XSS payloads for testing
-        self.XSS_PAYLOADS = [
-            "<script>alert(1)</script>",
-            "\"><img src=x onerror=alert(1)>",
-            "javascript:alert(1)",
-            "'><script>alert(1)</script>"
-        ]
+        self.XSS_PAYLOADS = load_xss_payloads()
 
 
     
@@ -441,7 +451,7 @@ async def main():
         custom_log = os.path.abspath(os.path.expanduser(args.setlog))
 
         if os.path.isdir(custom_log):
-            print(f"❌ '{custom_log}' is a directory. Please provide a full log file path like /path/to/pentest.log")
+            print(f"❌ '{custom_log}' is a directory. Please provide a full log file path like /path/to/pubstomp.log")
             sys.exit(1)
 
         save_config_key("log_path", custom_log)
@@ -449,14 +459,14 @@ async def main():
         sys.exit(0)
 
     if args.showlog:
-        print(load_config_key("log_path") or "~/pentest.log")
+        print(load_config_key("log_path") or "~/pubstomp.log")
         sys.exit(0)
 
     if not args.target:
         print("❌ Error: you must provide a target like 'pubstomp example.com'")
         sys.exit(1)
 
-    log_path = load_config_key("log_path") or os.path.expanduser("~/pentest.log")
+    log_path = load_config_key("log_path") or os.path.expanduser("~/pubstomp.log")
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.DEBUG)
     handler = RotatingFileHandler(os.path.expanduser(log_path), maxBytes=10*1024*1024, backupCount=5)
@@ -582,6 +592,25 @@ async def main():
         else:
             logger.info("Skipping crawling phase due to --nocrawl flag.")
             print(f"{Fore.YELLOW}⚠️ Skipping crawling phase (--nocrawl){Style.RESET_ALL}")
+
+
+        if args.setxss:
+            full_path = os.path.abspath(os.path.expanduser(args.setxss))
+            if not os.path.isfile(full_path):
+                print(f"❌ XSS wordlist path '{full_path}' does not exist.")
+                sys.exit(1)
+            save_config_key("xss_path", full_path)
+            print(f"✅ XSS wordlist set to: {full_path}")
+            sys.exit(0)
+
+        if args.showxss:
+            print(load_config_key("xss_path") or "Using default built-in XSS payloads.")
+            sys.exit(0)
+
+        if args.resetxss:
+            save_config_key("xss_path", None)
+            print("🔄 XSS wordlist reset to default payloads.")
+            sys.exit(0)
 
 
         # Test XSS on forms if --xss flag is provided
