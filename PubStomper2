@@ -427,7 +427,9 @@ async def main():
     parser.add_argument("--showoutput", action="store_true", help="Show current output directory for results")
     parser.add_argument("--setlog", help="Set custom log file path")
     parser.add_argument("--showlog", action="store_true", help="Show current log file path")
-
+    parser.add_argument("--showxss", action="store_true", help="Show current XSS wordlist path")
+    parser.add_argument("--resetxss", action="store_true", help="Reset to default built-in XSS payloads")
+    parser.add_argument("--setxss", help="Set custom wordlist path for XSS testing")
 
     args = parser.parse_args()
 
